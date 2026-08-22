@@ -5,6 +5,9 @@ from langchain.text_splitter import CharacterTextSplitter
 from langchain.embeddings import OpenAIEmbeddings, HuggingFaceInstructEmbeddings
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
+from langchain.chat_models import ChatOpenAI
+from langchain.memory import ConversationBufferMemory
+from langchain.chains import ConversationalRetrievalChain
 
 load_dotenv()
 
@@ -33,9 +36,21 @@ def get_vectorstore(text):
     vectorstore = FAISS.from_texts(texts=text, embedding=embeddings)
     return vectorstore
 
+def get_conversation_chain(vectorstore):
+    llm = ChatOpenAI()
+    memory = ConversationBufferMemory(memory_key='chat_history', return_message=True)
+    conversation_chain = ConversationalRetrievalChain.from_llm(
+        llm = llm,
+        retriever = vectorstore.as_retriever(),
+        memory=memory()
+    )
+    return conversation_chain
 
 def main():
     st.set_page_config(page_title="Chat with multiple PDFs", page_icon=":books:")
+
+    if "conversation" not in st.session_state:
+        st.session_state.conversation = None
 
     st.header("Chat with multiple PDFs :books:")
     st.text_input("Ask a question about your document")
@@ -52,6 +67,8 @@ def main():
                 #st.write(text_chunks)
 
                 vectorstore = get_vectorstore(text_chunks)
+
+                st.session_state.conversation = get_conversation_chain(vectorstore)
 
 if __name__ == '__main__':
     main()

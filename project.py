@@ -7,6 +7,7 @@ from langchain_community.vectorstores import FAISS
 from langchin.memory import ConversationBufferMemory
 from langchian.chains import ConversationalRetrievalChain
 from langchain_groq import ChatGroq
+from htmlTemplates import css, bot_template, user_template
 
 def get_pdf_text(pdf_docs):
     text = ""
@@ -43,3 +44,17 @@ def get_conversation_chain(vectorstore):
         memory=memory
     )
     return conversation_chain
+
+def handel_userinput(user_question):
+    if st.session_state.conversation is None:
+        st.warning("Please upload your PDFs and click 'process' before asking question.")
+        return
+
+    response = st.session_state.conversation.invoke({"question":user_question})
+    st.sessionstate.chat_history = response['chat_history']
+
+    for i, message in enumerate(st.session_state.chat_history):
+        if i % 2 == 0:
+            st.write(user_template.replace("{{MSG}}", message.content), unsafe_allow_html=True)
+        else:
+            st.write(bot_template.replace("{{MSG}}", message.content), unsafe_allow_html=True)

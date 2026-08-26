@@ -33,3 +33,13 @@ def get_vectorstore(text):
     )
     vectorstore = FAISS.from_text(text=text, embedding=embeddings)
     return vectorstore
+
+def get_conversation_chain(vectorstore):
+    llm = ChatGroq(model_name="openai/gpt-oss-120b", temperature=0.5)
+    memory = ConversationBufferMemory(memory_key='chat_history', return_messages=True)
+    conversation_chain = ConversationalRetrievalChain.from_llm(
+        llm=llm,
+        retriever=vectorstore.as_retriever(),
+        memory=memory
+    )
+    return conversation_chain

@@ -4,8 +4,8 @@ from PyPDF2 import PdfReader
 from langchain.text_splitter import CharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
-from langchin.memory import ConversationBufferMemory
-from langchian.chains import ConversationalRetrievalChain
+from langchain.memory import ConversationBufferMemory
+from langchain.chains import ConversationalRetrievalChain
 from langchain_groq import ChatGroq
 from htmlTemplates import css, bot_template, user_template
 
@@ -67,7 +67,7 @@ def main():
     if "conversation" not in st.session_state:
         st.session_state.conversation = None
     if "chat_history" not in st.session_state:
-        st.session_state.chat_history = None:
+        st.session_state.chat_history = None
 
     st.header("Chat with multiple PDFs :books:")
     user_question = st.text_input("Ask a question about your document")
@@ -75,7 +75,7 @@ def main():
         handel_userinput(user_question)
 
     with st.sidebar:
-        st.suvheader("Your Documents")
+        st.subheader("Your Documents")
         pdf_docs = st.file_uploader("Upload your PDFs here and click on 'process'", accept_multiple_files=True)
         if st.button("Process"):
             if not pdf_docs:

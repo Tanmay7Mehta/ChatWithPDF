@@ -32,7 +32,7 @@ def get_vectorstore(text):
         model_name="sentence-transformers/all-MiniLM-L6-v2",
         model_kwargs={'device':'cpu'}
     )
-    vectorstore = FAISS.from_text(text=text, embedding=embeddings)
+    vectorstore = FAISS.from_texts(texts=text, embedding=embeddings)
     return vectorstore
 
 def get_conversation_chain(vectorstore):
@@ -51,7 +51,7 @@ def handel_userinput(user_question):
         return
 
     response = st.session_state.conversation.invoke({"question":user_question})
-    st.sessionstate.chat_history = response['chat_history']
+    st.session_state.chat_history = response['chat_history']
 
     for i, message in enumerate(st.session_state.chat_history):
         if i % 2 == 0:

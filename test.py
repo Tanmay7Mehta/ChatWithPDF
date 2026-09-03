@@ -13,7 +13,7 @@ def get_pdf_text(pdf_docs):
     text = ""
     for pdf in pdf_docs:
         pdf_reader = PdfReader(pdf)
-        for page in pdf_reader.page:
+        for page in pdf_reader.pages:
             text += page.extract_text()
     return text
 
@@ -27,17 +27,28 @@ def get_text_chunks(text):
     chunks = text_splitter.split_text(text)
     return chunks
 
-def get_vectorstore(text):
-    embeddings = HuggingFaceEmbeddings(
+@st.cache_resource
+def get_embeddings():
+    return HuggingFaceEmbeddings(
         model_name="sentence-transformers/all-MiniLM-L6-v2",
-        model_kwargs={'device':'cpu'}
+        model_kwargs={'device': 'cpu', 'local_files_only': True}
     )
+def get_vectorstore(text):
+    embeddings = get_embeddings()
     vectorstore = FAISS.from_texts(texts=text, embedding=embeddings)
     return vectorstore
 
+#def get_vectorstore(text):
+#    embeddings = HuggingFaceEmbeddings(
+#        model_name="sentence-transformers/all-MiniLM-L6-v2",
+#        model_kwargs={'device':'cpu'}
+#    )
+#    vectorstore = FAISS.from_texts(texts=text, embedding=embeddings)
+#    return vectorstore
+
 def get_conversation_chain(vectorestore):
     llm = ChatGroq(model_name="openai/gpt-oss-120b", temperature=0.5)
-    memory = ConversationBufferMemory(memory_key='chat_history', return_message=True)
+    memory = ConversationBufferMemory(memory_key='chat_history', return_messages=True)
     conversation_chain = ConversationalRetrievalChain.from_llm(
         llm=llm,
         retriever=vectorestore.as_retriever(),

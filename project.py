@@ -11,6 +11,12 @@ from langchain_core.documents import Document
 from langchain.prompts import PromptTemplate
 from htmlTemplates import css, bot_template, user_template
 
+def get_retriever(vectorstore, selected_doc="All Documents"):
+    if selected_doc != "All Documents":
+        return vectorstore.as_retriever(search_kwargs={"filter": {"source": selected_doc}, "k": 4})
+    else:
+        return vectorstore.as_retriever(search_kwargs={"k": 8})
+
 def get_pdf_documents(pdf_docs):
     documents = []
     for pdf in pdf_docs:
@@ -43,22 +49,30 @@ def get_text_chunks(documents):
     chunks = text_splitter.split_documents(documents)
     return chunks
 
+@st.cache_resource
+def get_embeddings():
+    return HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2",
+        model_kwargs={'device': 'cpu'},
+        encode_kwargs={'normalize_embeddings': True})
+
 def get_vectorstore(text_chunks):
-    embeddings = HuggingFaceEmbeddings(
-        model_name="sentence-transformers/all-MiniLM-L6-v2",
-        model_kwargs={'device':'cpu'}
-    )
+    embeddings = get_embeddings()
+    #embeddings = HuggingFaceEmbeddings(
+    #    model_name="sentence-transformers/all-MiniLM-L6-v2",
+    #    model_kwargs={'device':'cpu'}
+    #)
     vectorstore = FAISS.from_documents(documents=text_chunks, embedding=embeddings)
     return vectorstore
 
 def get_conversation_chain(vectorstore, selected_doc="All Documents"):
     llm = ChatGroq(model_name="openai/gpt-oss-120b", temperature=0.2)# lower temperature for factual answers
     memory = ConversationBufferMemory(memory_key='chat_history', return_messages=True)
+    retriever = get_retriever(vectorstore, selected_doc)
 
-    if selected_doc != "All Documents":
-        retriever = vectorstore.as_retriever(search_kwargs={"filter": {"source": selected_doc}, "k": 4})
-    else:
-        retriever = vectorstore.as_retriever(search_kwargs={"k": 8})
+    #if selected_doc != "All Documents":
+    #    retriever = vectorstore.as_retriever(search_kwargs={"filter": {"source": selected_doc}, "k": 4})
+    #else:
+    #    retriever = vectorstore.as_retriever(search_kwargs={"k": 8})
 
     custom_template = """
     You are a helpful assistant answering questions using the retrieved context from uploaded PDF documents. Each chunk includes
@@ -133,6 +147,9 @@ def main():
 
         #if st.session_state.vectorstore is not None:
         #    st.session_state.conversation = get_conversation_chain(st.session_state.vectorstore, selected_doc)
+
+        if st.session_state.conversation is not None and st.session_state.vectorstore is not None:
+            st.session_state.conversation.retriever = get_retriever(st.session_state.vectorstore, selected_doc)
 
         if st.button("Process"):
             if not pdf_docs:

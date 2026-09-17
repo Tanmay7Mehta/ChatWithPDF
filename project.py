@@ -42,10 +42,10 @@ class RerankerRetriever(BaseRetriever):
 def get_retriever(vectorstore, selected_doc="All Documents"):
     if selected_doc != "All Documents":
         base = vectorstore.as_retriever(search_kwargs={"filter": {"source": selected_doc}, "k": 30})
-        return RerankerRetriever(base_retriever=base, top_k=10)
+        return RerankerRetriever(base_retriever=base, top_k=8)
     else:
         base = vectorstore.as_retriever(search_kwargs={"k": 30})
-        return RerankerRetriever(base_retriever=base, top_k=15)
+        return RerankerRetriever(base_retriever=base, top_k=10)
 
 def get_pdf_documents(pdf_docs):
     documents = []
@@ -76,6 +76,15 @@ def get_text_chunks(documents):
         length_function=len
     )
     chunks = text_splitter.split_documents(documents)
+
+    for chunk in chunks:
+        source = chunk.metadata.get("score", "Unknown")
+        page = chunk.metadata.get("page_num", "?")
+        header = f"---Document: {source} (Page{page}) ---\n"
+
+        if not chunk.page_content.startswith("---Document:"):
+            chunk.page_content = header + chunk.page_content
+
     return chunks
 
 @st.cache_resource

@@ -4,18 +4,48 @@ from PyPDF2 import PdfReader
 from langchain.text_splitter import CharacterTextSplitter, RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
+from langchain.schema import BaseRetriever
+from langchain_core.callbacks import CallbackManagerForRetrieverRun
 from langchain.memory import ConversationBufferMemory
 from langchain.chains import ConversationalRetrievalChain
 from langchain_groq import ChatGroq
 from langchain_core.documents import Document
 from langchain.prompts import PromptTemplate
 from htmlTemplates import css, bot_template, user_template
+from sentence_transformers import CrossEncoder
+from typing import List
+
+@st.cache_resource
+def get_reranker():
+    return CrossEncoder("cross-encoder/ms-marco-MiniLM-L6-v2")
+
+class RerankerRetriever(BaseRetriever):
+    """Custom retriever that over-fetches from FAISS then reranks with a cross-encoder."""
+    base_retriever: object
+    top_k: int = 4
+
+    class Config:
+        arbitrary_types_allowed = True
+
+    def _get_relevant_documents(self, query: str, *, run_manager: CallbackManagerForRetrieverRun) -> List[Document]:
+        # Over-fetch candidates from FAISS
+        docs = self.base_retriever.get_relevant_documents(query)
+        if not docs:
+            return []
+        # Rerank with cross-encoder
+        reranker = get_reranker()
+        pairs = [(query, doc.page_content) for doc in docs]
+        scores = reranker.predict(pairs)
+        ranked = sorted(zip(scores, docs), key=lambda x: x[0], reverse=True)
+        return [doc for _, doc in ranked[:self.top_k]]
 
 def get_retriever(vectorstore, selected_doc="All Documents"):
     if selected_doc != "All Documents":
-        return vectorstore.as_retriever(search_kwargs={"filter": {"source": selected_doc}, "k": 4})
+        base = vectorstore.as_retriever(search_kwargs={"filter": {"source": selected_doc}, "k": 30})
+        return RerankerRetriever(base_retriever=base, top_k=10)
     else:
-        return vectorstore.as_retriever(search_kwargs={"k": 8})
+        base = vectorstore.as_retriever(search_kwargs={"k": 30})
+        return RerankerRetriever(base_retriever=base, top_k=15)
 
 def get_pdf_documents(pdf_docs):
     documents = []
@@ -41,9 +71,8 @@ def get_pdf_text(pdf_docs):
 
 def get_text_chunks(documents):
     text_splitter = RecursiveCharacterTextSplitter(
-        #separator="\n",
-        chunk_size=3500,
-        chunk_overlap=200,
+        chunk_size=1500,
+        chunk_overlap=250,
         length_function=len
     )
     chunks = text_splitter.split_documents(documents)
@@ -75,8 +104,7 @@ def get_conversation_chain(vectorstore, selected_doc="All Documents"):
     #    retriever = vectorstore.as_retriever(search_kwargs={"k": 8})
 
     custom_template = """
-    You are a helpful assistant answering questions using the retrieved context from uploaded PDF documents. Each chunk includes
-    its document name header(e.g., '---Document: <filename> (Page <num>) ---').
+    You are a helpful assistant answering questions using the retrieved context from uploaded PDF documents. Each chunk includes its document name header(e.g., '---Document: <filename> (Page <num>) ---').
 
     Rules:
     1. When asked about a specific person or document, list ALL relevent entries (such as ALL work experiences, jobs, or projects)

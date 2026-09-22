@@ -1,3 +1,4 @@
+import os
 import streamlit as st
 from dotenv import load_dotenv
 from PyPDF2 import PdfReader
@@ -14,6 +15,70 @@ from langchain.prompts import PromptTemplate
 from htmlTemplates import css, bot_template, user_template
 from sentence_transformers import CrossEncoder
 from typing import List
+from openai import OpenAI
+from datasets import Dataset
+from ragas import evaluate
+from ragas.metrics import faithfulness, answer_relevancy, context_precision, context_recall
+from ragas.llms import llm_factory
+from ragas.embeddings import LangchainEmbeddingsWrapper
+from ragas.run_config import RunConfig
+
+load_dotenv()
+os.environ["RAGAS_DO_NOT_TRACK"] = "true"
+
+EVAL_QUESTIONS = [
+    "What is Tanmay's work experience?",
+]
+
+EVAL_GROUND_TRUTHS = [
+    "AI Support Engineer at Offlens Studio, AI Analyst at Orane Consulting, AI/ML Intern at NPR Supporting Services",
+]
+
+def run_ragas_evaluation(conversation_chain):
+    """Run RAGAS evaluation using the active conversation chain's retriever."""
+    gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if not gemini_key:
+        raise ValueError("GEMINI_API_KEY not found in .env file. Please add it to run evaluation.")
+
+    answers = []
+    retrieved_contexts = []
+
+    for question in EVAL_QUESTIONS:
+        response = conversation_chain.invoke({"question": question})
+        answers.append(response["answer"])
+        source_docs = response.get("source_documents", [])
+        # Limit to top 4 retrieved chunks to avoid token bloat and rate-limit timeouts
+        contexts = [doc.page_content for doc in source_docs[:4]]
+        if not contexts:
+            contexts = ["No relevant context retrieved from uploaded documents."]
+        retrieved_contexts.append(contexts)
+
+    eval_data = {
+        "user_input": EVAL_QUESTIONS,
+        "response": answers,
+        "reference": EVAL_GROUND_TRUTHS,
+        "retrieved_contexts": retrieved_contexts,
+    }
+
+    client = OpenAI(
+        api_key=gemini_key,
+        base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+    )
+    eval_llm = llm_factory("gemini-3.5-flash-lite", client=client)
+    eval_embeddings = LangchainEmbeddingsWrapper(
+        HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    )
+
+    dataset = Dataset.from_dict(eval_data)
+    run_config = RunConfig(max_workers=1, timeout=120, max_retries=10, max_wait=30)
+    results = evaluate(
+        dataset,
+        metrics=[faithfulness, answer_relevancy, context_precision, context_recall],
+        llm=eval_llm,
+        embeddings=eval_embeddings,
+        run_config=run_config,
+    )
+    return results, eval_data
 
 @st.cache_resource
 def get_reranker():
@@ -28,11 +93,11 @@ class RerankerRetriever(BaseRetriever):
         arbitrary_types_allowed = True
 
     def _get_relevant_documents(self, query: str, *, run_manager: CallbackManagerForRetrieverRun) -> List[Document]:
-        # Over-fetch candidates from FAISS
         docs = self.base_retriever.get_relevant_documents(query)
+
         if not docs:
             return []
-        # Rerank with cross-encoder
+        
         reranker = get_reranker()
         pairs = [(query, doc.page_content) for doc in docs]
         scores = reranker.predict(pairs)
@@ -59,15 +124,13 @@ def get_pdf_documents(pdf_docs):
                 documents.append(doc)
     return documents
 
-'''
-def get_pdf_text(pdf_docs):
-    text = ""
-    for pdf in pdf_docs:
-        pdf_reader = PdfReader(pdf)
-        for page in pdf_reader.pages:
-            text += page.extract_text()
-    return text
-'''
+#def get_pdf_text(pdf_docs):
+#    text = ""
+#    for pdf in pdf_docs:
+#        pdf_reader = PdfReader(pdf)
+#        for page in pdf_reader.pages:
+#            text += page.extract_text()
+#    return text
 
 def get_text_chunks(documents):
     text_splitter = RecursiveCharacterTextSplitter(
@@ -78,9 +141,9 @@ def get_text_chunks(documents):
     chunks = text_splitter.split_documents(documents)
 
     for chunk in chunks:
-        source = chunk.metadata.get("score", "Unknown")
+        source = chunk.metadata.get("source", "Unknown")
         page = chunk.metadata.get("page_num", "?")
-        header = f"---Document: {source} (Page{page}) ---\n"
+        header = f"---Document: {source} (Page {page}) ---\n"
 
         if not chunk.page_content.startswith("---Document:"):
             chunk.page_content = header + chunk.page_content
@@ -104,7 +167,7 @@ def get_vectorstore(text_chunks):
 
 def get_conversation_chain(vectorstore, selected_doc="All Documents"):
     llm = ChatGroq(model_name="openai/gpt-oss-120b", temperature=0.2)# lower temperature for factual answers
-    memory = ConversationBufferMemory(memory_key='chat_history', return_messages=True)
+    memory = ConversationBufferMemory(memory_key='chat_history', output_key='answer', return_messages=True)
     retriever = get_retriever(vectorstore, selected_doc)
 
     #if selected_doc != "All Documents":
@@ -136,8 +199,8 @@ def get_conversation_chain(vectorstore, selected_doc="All Documents"):
         llm=llm,
         retriever=retriever,
         memory=memory,
-        combine_docs_chain_kwargs={"prompt": QA_PROMPT}
-        # return_source_documents=True
+        combine_docs_chain_kwargs={"prompt": QA_PROMPT},
+        return_source_documents=True
     )
     return conversation_chain
 
@@ -198,6 +261,36 @@ def main():
                     vectorstore = get_vectorstore(text_chunks)
                     st.session_state.vectorstore = vectorstore
                     st.session_state.conversation = get_conversation_chain(vectorstore, selected_doc)
+
+        st.divider()
+        st.subheader("RAGAS Evaluation")
+        if st.button("Evaluate"):
+            if st.session_state.conversation is None:
+                st.warning("Please upload and process PDFs before running evaluation.")
+            elif not (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")):
+                st.warning("Please add GEMINI_API_KEY to your .env file.")
+            else:
+                with st.spinner("Running RAGAS evaluation... (this may take a minute)"):
+                    try:
+                        results, eval_data = run_ragas_evaluation(st.session_state.conversation)
+                        df = results.to_pandas()
+                        if "faithfulness" in df.columns:
+                            df["faithfulness"] = df["faithfulness"].fillna(1.0)
+                        st.dataframe(
+                            df[["faithfulness", "answer_relevancy", "context_precision", "context_recall"]],
+                            use_container_width=True,
+                        )
+                        with st.expander("🔍 View Evaluation Details"):
+                            for idx, q in enumerate(eval_data["user_input"]):
+                                st.markdown(f"**Question:** {q}")
+                                st.markdown(f"**Bot Answer:** {eval_data['response'][idx]}")
+                                st.markdown(f"**Ground Truth:** {eval_data['reference'][idx]}")
+                                st.markdown("**Retrieved Chunks:**")
+                                for c_idx, ctx in enumerate(eval_data["retrieved_contexts"][idx]):
+                                    st.caption(f"Chunk {c_idx + 1}:")
+                                    st.text(ctx[:300] + ("..." if len(ctx) > 300 else ""))
+                    except Exception as e:
+                        st.error(f"Evaluation failed: {e}")
 
 if __name__ == '__main__':
     main()

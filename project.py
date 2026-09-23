@@ -3,6 +3,7 @@ import streamlit as st
 from dotenv import load_dotenv
 from PyPDF2 import PdfReader
 from langchain.text_splitter import CharacterTextSplitter, RecursiveCharacterTextSplitter
+# pyrefly: ignore [missing-import]
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain.schema import BaseRetriever
@@ -47,7 +48,6 @@ def run_ragas_evaluation(conversation_chain):
         response = conversation_chain.invoke({"question": question})
         answers.append(response["answer"])
         source_docs = response.get("source_documents", [])
-        # Include up to top 6 retrieved chunks
         contexts = [doc.page_content for doc in source_docs[:6]]
         if not contexts:
             contexts = ["No relevant context retrieved from uploaded documents."]
@@ -103,17 +103,13 @@ class RerankerRetriever(BaseRetriever):
         scores = reranker.predict(pairs)
         ranked = sorted(zip(scores, docs), key=lambda x: x[0], reverse=True)
         
-        # Group candidates by source document to ensure multi-document queries (e.g. comparisons) get fair coverage
         by_source = {}
         for score, doc in ranked:
             src = doc.metadata.get("source", "Unknown")
             by_source.setdefault(src, []).append((score, doc))
 
-        # Best overall chunk score
         best_score = ranked[0][0]
 
-        # Only retain documents whose best chunk is within a reasonable margin of the top match
-        # This filters out completely unrelated documents while keeping all relevant ones for comparisons/listings
         valid_sources = [
             src for src, items in by_source.items()
             if items[0][0] >= best_score - 7.0
@@ -121,7 +117,6 @@ class RerankerRetriever(BaseRetriever):
         if not valid_sources:
             valid_sources = list(by_source.keys())[:1]
 
-        # Interleave chunks across valid sources up to top_k
         selected = []
         indices = {src: 0 for src in valid_sources}
         while len(selected) < self.top_k:
@@ -181,10 +176,6 @@ def get_embeddings():
 
 def get_vectorstore(text_chunks):
     embeddings = get_embeddings()
-    #embeddings = HuggingFaceEmbeddings(
-    #    model_name="sentence-transformers/all-MiniLM-L6-v2",
-    #    model_kwargs={'device':'cpu'}
-    #)
     vectorstore = FAISS.from_documents(documents=text_chunks, embedding=embeddings)
     return vectorstore
 
@@ -192,11 +183,6 @@ def get_conversation_chain(vectorstore, selected_doc="All Documents"):
     llm = ChatGroq(model_name="openai/gpt-oss-120b", temperature=0.2)# lower temperature for factual answers
     memory = ConversationBufferMemory(memory_key='chat_history', output_key='answer', return_messages=True)
     retriever = get_retriever(vectorstore, selected_doc)
-
-    #if selected_doc != "All Documents":
-    #    retriever = vectorstore.as_retriever(search_kwargs={"filter": {"source": selected_doc}, "k": 4})
-    #else:
-    #    retriever = vectorstore.as_retriever(search_kwargs={"k": 8})
 
     custom_template = """
     You are a helpful assistant answering questions using the retrieved context from uploaded PDF documents. Each chunk includes its document name header (e.g., '--- Document: <filename> (Page <num>) ---').
@@ -235,11 +221,36 @@ def handel_userinput(user_question):
     response = st.session_state.conversation.invoke({"question": user_question})
     st.session_state.chat_history = response['chat_history']
 
+    if "sources_history" not in st.session_state:
+        st.session_state.sources_history = []
+    
+    st.session_state.sources_history.append(response.get("source_documents", []))
+
+    bot_turn = 0
     for i, message in enumerate(st.session_state.chat_history):
         if i % 2 == 0:
             st.write(user_template.replace("{{MSG}}", message.content), unsafe_allow_html=True)
         else:
             st.write(bot_template.replace("{{MSG}}", message.content), unsafe_allow_html=True)
+            
+            if bot_turn < len(st.session_state.sources_history):
+                docs = st.session_state.sources_history[bot_turn]
+                if docs:
+                    with st.expander(f"📚 View Sources & Citations ({len(docs)} chunks retrieved)"):
+                        for idx, doc in enumerate(docs):
+                            source = doc.metadata.get("source", "Unknown Document")
+                            page = doc.metadata.get("page_num", "Unknown")
+                            st.markdown(f"**Source {idx + 1}:** 📄 `{source}` — *Page {page}*")
+                            
+                            preview_text = doc.page_content
+                            if preview_text.startswith("--- Document:"):
+                                lines = preview_text.split("\n", 1)
+                                if len(lines) > 1:
+                                    preview_text = lines[1]
+                            
+                            st.caption(preview_text.strip()[:350] + ("..." if len(preview_text.strip()) > 350 else ""))
+                            st.divider()
+            bot_turn += 1
 
 def main():
     load_dotenv()
@@ -252,6 +263,9 @@ def main():
 
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = None
+
+    if "sources_history" not in st.session_state:
+        st.session_state.sources_history = []
 
     if "vectorstore" not in st.session_state:
         st.session_state.vectorstore = None
@@ -268,9 +282,6 @@ def main():
         doc_names = [pdf.name for pdf in pdf_docs] if pdf_docs else []
         selected_doc = st.selectbox("Filter questions to a specific PDF:", options=["All Documents"]+ doc_names)
 
-        #if st.session_state.vectorstore is not None:
-        #    st.session_state.conversation = get_conversation_chain(st.session_state.vectorstore, selected_doc)
-
         if st.session_state.conversation is not None and st.session_state.vectorstore is not None:
             st.session_state.conversation.retriever = get_retriever(st.session_state.vectorstore, selected_doc)
 
@@ -284,6 +295,8 @@ def main():
                     vectorstore = get_vectorstore(text_chunks)
                     st.session_state.vectorstore = vectorstore
                     st.session_state.conversation = get_conversation_chain(vectorstore, selected_doc)
+                    st.session_state.chat_history = None
+                    st.session_state.sources_history = []
 
         st.divider()
         st.subheader("RAGAS Evaluation")

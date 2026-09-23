@@ -1,7 +1,14 @@
 streamlit
 pypdf2
 langchain
-python-dotenv
+langchain-community
+langchain-core
+langchain-groq
+langchain-huggingface
+sentence-transformers
 faiss-cpu
+python-dotenv
 openai
-huggingface_hub
+ragas
+datasets
+pandas

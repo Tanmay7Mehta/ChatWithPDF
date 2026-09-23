@@ -47,8 +47,8 @@ def run_ragas_evaluation(conversation_chain):
         response = conversation_chain.invoke({"question": question})
         answers.append(response["answer"])
         source_docs = response.get("source_documents", [])
-        # Limit to top 4 retrieved chunks to avoid token bloat and rate-limit timeouts
-        contexts = [doc.page_content for doc in source_docs[:4]]
+        # Include up to top 6 retrieved chunks
+        contexts = [doc.page_content for doc in source_docs[:6]]
         if not contexts:
             contexts = ["No relevant context retrieved from uploaded documents."]
         retrieved_contexts.append(contexts)
@@ -87,7 +87,7 @@ def get_reranker():
 class RerankerRetriever(BaseRetriever):
     """Custom retriever that over-fetches from FAISS then reranks with a cross-encoder."""
     base_retriever: object
-    top_k: int = 4
+    top_k: int = 6
 
     class Config:
         arbitrary_types_allowed = True
@@ -102,15 +102,47 @@ class RerankerRetriever(BaseRetriever):
         pairs = [(query, doc.page_content) for doc in docs]
         scores = reranker.predict(pairs)
         ranked = sorted(zip(scores, docs), key=lambda x: x[0], reverse=True)
-        return [doc for _, doc in ranked[:self.top_k]]
+        
+        # Group candidates by source document to ensure multi-document queries (e.g. comparisons) get fair coverage
+        by_source = {}
+        for score, doc in ranked:
+            src = doc.metadata.get("source", "Unknown")
+            by_source.setdefault(src, []).append((score, doc))
+
+        # Best overall chunk score
+        best_score = ranked[0][0]
+
+        # Only retain documents whose best chunk is within a reasonable margin of the top match
+        # This filters out completely unrelated documents while keeping all relevant ones for comparisons/listings
+        valid_sources = [
+            src for src, items in by_source.items()
+            if items[0][0] >= best_score - 7.0
+        ]
+        if not valid_sources:
+            valid_sources = list(by_source.keys())[:1]
+
+        # Interleave chunks across valid sources up to top_k
+        selected = []
+        indices = {src: 0 for src in valid_sources}
+        while len(selected) < self.top_k:
+            added = False
+            for src in valid_sources:
+                if len(selected) < self.top_k and indices[src] < len(by_source[src]):
+                    selected.append(by_source[src][indices[src]][1])
+                    indices[src] += 1
+                    added = True
+            if not added:
+                break
+
+        return selected
 
 def get_retriever(vectorstore, selected_doc="All Documents"):
     if selected_doc != "All Documents":
         base = vectorstore.as_retriever(search_kwargs={"filter": {"source": selected_doc}, "k": 30})
-        return RerankerRetriever(base_retriever=base, top_k=8)
+        return RerankerRetriever(base_retriever=base, top_k=6)
     else:
-        base = vectorstore.as_retriever(search_kwargs={"k": 30})
-        return RerankerRetriever(base_retriever=base, top_k=10)
+        base = vectorstore.as_retriever(search_kwargs={"k": 40})
+        return RerankerRetriever(base_retriever=base, top_k=6)
 
 def get_pdf_documents(pdf_docs):
     documents = []
@@ -119,23 +151,15 @@ def get_pdf_documents(pdf_docs):
         for page_num, page in enumerate(pdf_reader.pages):
             text = page.extract_text()
             if text:
-                annotated_content = f"---Document: {pdf.name} (Page {page_num + 1}) ---\n{text}"
-                doc = Document(page_content=annotated_content, metadata={"source": pdf.name, "page_num": page_num + 1})
+                doc = Document(page_content=text, metadata={"source": pdf.name, "page_num": page_num + 1})
                 documents.append(doc)
     return documents
 
-#def get_pdf_text(pdf_docs):
-#    text = ""
-#    for pdf in pdf_docs:
-#        pdf_reader = PdfReader(pdf)
-#        for page in pdf_reader.pages:
-#            text += page.extract_text()
-#    return text
-
 def get_text_chunks(documents):
     text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1500,
-        chunk_overlap=250,
+        chunk_size=1600,
+        chunk_overlap=300,
+        separators=["\n\n", "\n", ". ", " ", ""],
         length_function=len
     )
     chunks = text_splitter.split_documents(documents)
@@ -143,10 +167,9 @@ def get_text_chunks(documents):
     for chunk in chunks:
         source = chunk.metadata.get("source", "Unknown")
         page = chunk.metadata.get("page_num", "?")
-        header = f"---Document: {source} (Page {page}) ---\n"
-
-        if not chunk.page_content.startswith("---Document:"):
-            chunk.page_content = header + chunk.page_content
+        header = f"--- Document: {source} (Page {page}) ---\n"
+        if not chunk.page_content.startswith("--- Document:"):
+            chunk.page_content = header + chunk.page_content.strip()
 
     return chunks
 
@@ -176,13 +199,13 @@ def get_conversation_chain(vectorstore, selected_doc="All Documents"):
     #    retriever = vectorstore.as_retriever(search_kwargs={"k": 8})
 
     custom_template = """
-    You are a helpful assistant answering questions using the retrieved context from uploaded PDF documents. Each chunk includes its document name header(e.g., '---Document: <filename> (Page <num>) ---').
+    You are a helpful assistant answering questions using the retrieved context from uploaded PDF documents. Each chunk includes its document name header (e.g., '--- Document: <filename> (Page <num>) ---').
 
     Rules:
-    1. When asked about a specific person or document, list ALL relevent entries (such as ALL work experiences, jobs, or projects)
-    found for that document. Do not stop after just one.
-    2. DO NOT mix or combine information from different documents.
-    3. If the answer cannot be found in the context, say that you do not have enough information.
+    1. When asked about a specific person or document, list ALL relevant entries (such as ALL work experiences, jobs, or projects) found for that document. Do not stop after just one.
+    2. When asked to compare multiple people or documents, or when asked general questions across all documents (e.g., 'List all work experiences' or 'Compare X and Y'), organize the response clearly by person/document and include all matching information found in the context.
+    3. DO NOT mix or combine information from different documents under the same person.
+    4. If the answer cannot be found in the context, say that you do not have enough information.
 
     context: {context}
     Chat History: {chat_history}
